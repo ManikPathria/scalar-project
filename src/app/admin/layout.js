@@ -71,7 +71,7 @@ export default function AdminLayout({ children }) {
         <div className="absolute bottom-0 w-full p-6 border-t border-slate-100">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-600 border border-slate-200">
-              HS
+              MP
             </div>
             <div className="overflow-hidden">
               <p className="text-sm font-bold text-slate-900 truncate">Manik Pathria</p>
