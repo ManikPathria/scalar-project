@@ -1,7 +1,11 @@
 "use client";
 import React, { useState, useEffect, use } from 'react'; 
 import { supabase } from '@/lib/supabase';
-import { format, addDays, startOfToday, parse, addMinutes, isBefore, isEqual, getDay } from 'date-fns';
+import { 
+  format, startOfToday, parse, addMinutes, isBefore, isEqual, getDay, 
+  addMonths, subMonths, startOfMonth, endOfMonth, startOfWeek, 
+  endOfWeek, eachDayOfInterval, isSameMonth 
+} from 'date-fns';
 import { useRouter } from 'next/navigation';
 
 export default function PublicBookingPage({ params }) {
@@ -12,6 +16,10 @@ export default function PublicBookingPage({ params }) {
   const [event, setEvent] = useState(null);
   const [availability, setAvailability] = useState([]);
   
+  // Calendar UI State
+  const today = startOfToday();
+  const [currentMonth, setCurrentMonth] = useState(today); 
+
   // Date and Time selection state
   const [selectedDateObject, setSelectedDateObject] = useState(null);
   const [dynamicTimeSlots, setDynamicTimeSlots] = useState([]);
@@ -22,27 +30,13 @@ export default function PublicBookingPage({ params }) {
   const [showForm, setShowForm] = useState(false);
   const [guestName, setGuestName] = useState('');
   const [guestEmail, setGuestEmail] = useState('');
+  const [guestNotes, setGuestNotes] = useState(''); 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Generate an array of the next 30 days starting from today
-  const today = startOfToday();
-  const next30Days = Array.from({ length: 30 }).map((_, i) => addDays(today, i));
-
-  // 1. FETCH EVENT & AVAILABILITY ON LOAD
   useEffect(() => {
     async function fetchData() {
-      // Fetch Event details
-      const { data: eventData } = await supabase
-        .from('event_types')
-        .select('*')
-        .eq('slug', slug)
-        .single();
-        
-      // Fetch user's weekly availability rules
-      const { data: availData } = await supabase
-        .from('availability')
-        .select('*')
-        .eq('is_active', true);
+      const { data: eventData } = await supabase.from('event_types').select('*').eq('slug', slug).single();
+      const { data: availData } = await supabase.from('availability').select('*');
 
       setEvent(eventData);
       setAvailability(availData || []);
@@ -51,53 +45,100 @@ export default function PublicBookingPage({ params }) {
     fetchData();
   }, [slug]);
 
-  // 2. GENERATE TIME SLOTS WHEN A DATE IS CLICKED
-  const handleDateSelect = (date) => {
+  // GENERATE PROPER MONTH CALENDAR GRID
+  const firstDayOfMonth = startOfMonth(currentMonth);
+  const lastDayOfMonth = endOfMonth(currentMonth);
+  const startDate = startOfWeek(firstDayOfMonth);
+  const endDate = endOfWeek(lastDayOfMonth);
+
+  const calendarDays = eachDayOfInterval({
+    start: startDate,
+    end: endDate
+  });
+
+  const handleNextMonth = () => setCurrentMonth(addMonths(currentMonth, 1));
+  const handlePrevMonth = () => setCurrentMonth(subMonths(currentMonth, 1));
+
+  // GENERATE TIME SLOTS
+  const handleDateSelect = async (date) => {
     setSelectedDateObject(date);
     setSelectedTime(null);
     setShowForm(false);
+    setDynamicTimeSlots([]); 
 
-    if (!event || !availability.length) {
-      setDynamicTimeSlots([]);
-      return;
+    if (!event || !availability.length) return;
+
+    const dateString = format(date, 'yyyy-MM-dd');
+    const dayOfWeekIndex = getDay(date); 
+    
+    let workingHours = [];
+
+    const overrideRules = availability.filter(rule => rule.specific_date === dateString);
+
+    if (overrideRules.length > 0) {
+      const isUnavailable = overrideRules.some(row => row.is_active === false);
+      if (isUnavailable) return; 
+      workingHours = overrideRules; 
+    } else {
+      workingHours = availability.filter(rule => 
+        rule.day_of_week === dayOfWeekIndex && 
+        rule.specific_date === null && 
+        rule.is_active === true
+      );
     }
 
-    const dayOfWeekIndex = getDay(date); // 0 = Sunday, 1 = Monday, etc.
+    if (workingHours.length === 0) return;
+
+    const startOfDayIso = new Date(date.setHours(0, 0, 0, 0)).toISOString();
+    const endOfDayIso = new Date(date.setHours(23, 59, 59, 999)).toISOString();
     
-    // Find availability rules for this specific day of the week
-    const dayRules = availability.filter(rule => rule.day_of_week === dayOfWeekIndex);
-    
+    const { data: existingBookings } = await supabase
+      .from('bookings')
+      .select('booking_time')
+      .gte('booking_time', startOfDayIso)
+      .lte('booking_time', endOfDayIso);
+
     let generatedSlots = [];
 
-    // Loop through each interval rule for that day (e.g. 09:00-12:00)
-    dayRules.forEach(rule => {
-      // Parse the DB time strings into actual Date objects for math
-      let currentSlotTime = parse(rule.start_time.substring(0, 5), 'HH:mm', date);
-      const endTime = parse(rule.end_time.substring(0, 5), 'HH:mm', date);
+    workingHours.forEach(rule => {
+      if (!rule.start_time || !rule.end_time) return;
 
-      // Keep adding slots based on event duration until we hit the end time
-      while (isBefore(currentSlotTime, endTime) || isEqual(currentSlotTime, endTime)) {
-        const slotEndTime = addMinutes(currentSlotTime, event.duration);
-        
-        // Ensure the full meeting fits before the shift ends
-        if (isBefore(slotEndTime, endTime) || isEqual(slotEndTime, endTime)) {
+      // TIMEZONE FIX: Use exact JS Date objects
+      const [startHour, startMin] = rule.start_time.split(':');
+      let currentSlotTime = new Date(date);
+      currentSlotTime.setHours(parseInt(startHour), parseInt(startMin), 0, 0);
+
+      const [endHour, endMin] = rule.end_time.split(':');
+      const endTime = new Date(date);
+      endTime.setHours(parseInt(endHour), parseInt(endMin), 0, 0);
+
+      while (currentSlotTime.getTime() + (event.duration * 60000) <= endTime.getTime()) {
+        const isBooked = existingBookings?.some(b => 
+          new Date(b.booking_time).getTime() === currentSlotTime.getTime()
+        );
+
+        if (!isBooked) {
           generatedSlots.push(format(currentSlotTime, 'HH:mm'));
         }
-        currentSlotTime = addMinutes(currentSlotTime, event.duration); // Move forward by duration
+        
+        currentSlotTime = new Date(currentSlotTime.getTime() + event.duration * 60000); 
       }
     });
 
     setDynamicTimeSlots(generatedSlots);
   };
 
-  // 3. HANDLE FINAL SUBMISSION
+  // HANDLE FINAL SUBMISSION
   const handleScheduleEvent = async (e) => {
     e.preventDefault();
     setIsSubmitting(true);
 
-    // Format final timestamp for Supabase (YYYY-MM-DDTHH:mm:ss)
-    const bookingDateStr = format(selectedDateObject, 'yyyy-MM-dd');
-    const timestamp = `${bookingDateStr}T${selectedTime}:00`;
+    // TIMEZONE FIX: Properly format the final timestamp for the database
+    const [hours, minutes] = selectedTime.split(':');
+    const finalBookingDate = new Date(selectedDateObject);
+    finalBookingDate.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+    
+    const timestamp = finalBookingDate.toISOString(); 
 
     const res = await fetch('/api/bookings', {
       method: 'POST',
@@ -107,6 +148,7 @@ export default function PublicBookingPage({ params }) {
         eventTitle: event.title,
         guestName,
         guestEmail,
+        guestNotes, 
         startTime: timestamp
       })
     });
@@ -115,7 +157,7 @@ export default function PublicBookingPage({ params }) {
       const displayDate = format(selectedDateObject, 'EEEE, MMMM do, yyyy');
       router.push(`/book/${slug}/success?name=${encodeURIComponent(guestName)}&date=${encodeURIComponent(displayDate)}&time=${encodeURIComponent(selectedTime)}&event=${encodeURIComponent(event.title)}`);
     } else {
-      alert("Failed to book the event. Ensure the /api/bookings route exists.");
+      alert("Failed to book the event. Someone else may have just taken this slot!");
       setIsSubmitting(false);
     }
   };
@@ -127,8 +169,8 @@ export default function PublicBookingPage({ params }) {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-6">
       <div className="max-w-4xl w-full bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col md:flex-row min-h-[600px]">
         
-        {/* --- LEFT COLUMN: EVENT INFO --- */}
-        <div className="w-full md:w-[350px] p-8 border-b md:border-b-0 md:border-r border-slate-100 relative">
+        {/* LEFT COLUMN: EVENT INFO */}
+        <div className="w-full md:w-[350px] p-8 border-b md:border-b-0 md:border-r border-slate-100 relative bg-white z-10">
           <button 
             onClick={() => showForm ? setShowForm(false) : router.push('/admin/dashboard')} 
             className="mb-8 text-[#006bff] hover:text-blue-800 transition-colors w-10 h-10 flex items-center justify-center rounded-full border border-blue-100 hover:bg-blue-50"
@@ -152,54 +194,80 @@ export default function PublicBookingPage({ params }) {
                   <span>{selectedTime}, {format(selectedDateObject, 'EEEE, MMMM d')}</span>
                 </div>
               )}
-
-              <div className="flex items-center gap-2 text-slate-600 font-bold">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15.6 11.6L22 7v10l-6.4-4.6v-1.8z"/><rect x="2" y="5" width="14" height="14" rx="2"/></svg>
-                <span>Web conferencing details provided upon confirmation.</span>
-              </div>
             </div>
           </div>
         </div>
 
-        {/* --- RIGHT COLUMN: SCHEDULER OR FORM --- */}
-        <div className="flex-1 p-8">
+        {/* RIGHT COLUMN: SCHEDULER OR FORM */}
+        <div className="flex-1 p-8 bg-white">
           
           {!showForm ? (
-            /* PHASE 1: DATE AND TIME PICKER */
+            /* PHASE 1: CALENDAR */
             <>
               <h2 className="text-xl font-bold text-slate-900 mb-6">Select a Date & Time</h2>
               <div className="flex flex-col lg:flex-row gap-8">
                 
-                {/* CALENDAR GRID */}
                 <div className="flex-1">
+                  {/* Month Navigation */}
+                  <div className="flex justify-between items-center mb-6">
+                    <button 
+                      onClick={handlePrevMonth} 
+                      disabled={isBefore(currentMonth, startOfMonth(today))}
+                      className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                    </button>
+                    <span className="font-bold text-slate-800">
+                      {format(currentMonth, 'MMMM yyyy')}
+                    </span>
+                    <button 
+                      onClick={handleNextMonth} 
+                      className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </button>
+                  </div>
+
                   <div className="grid grid-cols-7 gap-1 text-center mb-4">
                     {['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'].map(d => (
                       <span key={d} className="text-[10px] font-bold text-slate-400">{d}</span>
                     ))}
                   </div>
                   
-                  {/* Dynamic Days mapped from today */}
                   <div className="grid grid-cols-7 gap-2">
-                    {/* Empty slots to align the first day to the correct weekday column */}
-                    {Array.from({ length: getDay(next30Days[0]) }).map((_, i) => (
-                      <div key={`empty-${i}`} />
-                    ))}
-                    
-                    {next30Days.map((date, i) => {
+                    {calendarDays.map((date, i) => {
+                      const isCurrentMonthView = isSameMonth(date, currentMonth);
+
+                      // FIX: Instead of hiding, render an empty slot to keep the grid aligned
+                      if (!isCurrentMonthView) {
+                        return <div key={`empty-${i}`} className="h-10 w-10 mx-auto" />;
+                      }
+
                       const isSelected = selectedDateObject && format(selectedDateObject, 'yyyy-MM-dd') === format(date, 'yyyy-MM-dd');
-                      // Check if this day is actually enabled in availability
-                      const hasAvailability = availability.some(a => a.day_of_week === getDay(date));
+                      const isPastDate = isBefore(date, today);
+                      const dateString = format(date, 'yyyy-MM-dd');
+                      const dayOfWeekIndex = getDay(date);
+
+                      let hasAvailability = false;
+                      if (!isPastDate) {
+                        const override = availability.find(a => a.specific_date === dateString);
+                        if (override) {
+                          hasAvailability = override.is_active; 
+                        } else {
+                          hasAvailability = availability.some(a => a.day_of_week === dayOfWeekIndex && a.specific_date === null && a.is_active === true);
+                        }
+                      }
 
                       return (
                         <button
                           key={i}
-                          disabled={!hasAvailability}
+                          disabled={!hasAvailability || isPastDate}
                           onClick={() => handleDateSelect(date)}
-                          className={`h-10 w-10 flex items-center justify-center rounded-full font-bold text-sm transition-all
-                            ${!hasAvailability ? 'text-slate-300 cursor-not-allowed' : ''}
+                          className={`h-10 w-10 flex items-center justify-center rounded-full font-bold text-sm transition-all mx-auto
+                            ${(!hasAvailability || isPastDate) ? 'text-slate-200 cursor-not-allowed' : ''}
                             ${isSelected 
                               ? 'bg-[#006bff] text-white shadow-md' 
-                              : hasAvailability ? 'text-[#006bff] bg-blue-50 hover:bg-[#006bff] hover:text-white' : ''
+                              : (hasAvailability && !isPastDate) ? 'text-[#006bff] bg-blue-50 hover:bg-[#006bff] hover:text-white' : ''
                             }`}
                         >
                           {format(date, 'd')}
@@ -248,47 +316,24 @@ export default function PublicBookingPage({ params }) {
               </div>
             </>
           ) : (
-            /* PHASE 2: GUEST DETAILS FORM */
+            /* PHASE 2: FORM */
             <div className="max-w-md animate-in fade-in slide-in-from-right-8 duration-300">
               <h2 className="text-xl font-bold text-slate-900 mb-6">Enter Details</h2>
-              
               <form onSubmit={handleScheduleEvent} className="space-y-5">
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">Name *</label>
-                  <input 
-                    required
-                    type="text"
-                    className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]"
-                    value={guestName}
-                    onChange={(e) => setGuestName(e.target.value)}
-                  />
+                  <input required type="text" className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]" value={guestName} onChange={(e) => setGuestName(e.target.value)} />
                 </div>
-                
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">Email *</label>
-                  <input 
-                    required
-                    type="email"
-                    className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]"
-                    value={guestEmail}
-                    onChange={(e) => setGuestEmail(e.target.value)}
-                  />
+                  <input required type="email" className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]" value={guestEmail} onChange={(e) => setGuestEmail(e.target.value)} />
                 </div>
-
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">Please share anything that will help prepare for our meeting.</label>
-                  <textarea 
-                    rows="3"
-                    className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]"
-                  ></textarea>
+                  <textarea rows="3" className="w-full border border-slate-300 p-3 rounded-lg outline-none focus:ring-2 focus:ring-[#006bff]" value={guestNotes} onChange={(e) => setGuestNotes(e.target.value)}></textarea>
                 </div>
-
                 <div className="pt-4">
-                  <button 
-                    type="submit" 
-                    disabled={isSubmitting}
-                    className="bg-[#006bff] text-white px-8 py-3 rounded-full font-bold hover:bg-blue-700 transition-all disabled:opacity-50"
-                  >
+                  <button type="submit" disabled={isSubmitting} className="bg-[#006bff] text-white px-8 py-3 rounded-full font-bold hover:bg-blue-700 transition-all disabled:opacity-50">
                     {isSubmitting ? 'Scheduling...' : 'Schedule Event'}
                   </button>
                 </div>

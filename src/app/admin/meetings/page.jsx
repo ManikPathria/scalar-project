@@ -1,14 +1,17 @@
 "use client";
 import React, { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { format, isAfter, isBefore, parseISO } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 
 export default function MeetingsPage() {
   const [bookings, setBookings] = useState([]);
   const [activeTab, setActiveTab] = useState('upcoming'); // 'upcoming' or 'past'
   const [loading, setLoading] = useState(true);
+  
+  // NEW: Search state
+  const [searchTerm, setSearchTerm] = useState('');
 
-  // NEW STATE: Track the booking selected for the Details Modal
+  // Track the booking selected for the Details Modal
   const [selectedBooking, setSelectedBooking] = useState(null);
 
   useEffect(() => {
@@ -17,7 +20,12 @@ export default function MeetingsPage() {
 
   async function fetchBookings() {
     setLoading(true);
-    const { data, error } = await supabase
+    
+    // Get current time in ISO format for the database query
+    const now = new Date().toISOString();
+
+    // Start building the Supabase query
+    let query = supabase
       .from('bookings')
       .select(`
         *,
@@ -26,27 +34,31 @@ export default function MeetingsPage() {
           duration,
           color
         )
-      `)
-      .order('booking_time', { ascending: activeTab === 'upcoming' });
+      `);
+
+    // FIX: Let the database handle the date filtering instead of JavaScript
+    if (activeTab === 'upcoming') {
+      // Greater than or equal to now, ascending (soonest first)
+      query = query.gte('booking_time', now).order('booking_time', { ascending: true });
+    } else {
+      // Less than now, descending (most recent past event first)
+      query = query.lt('booking_time', now).order('booking_time', { ascending: false });
+    }
+
+    const { data, error } = await query;
 
     if (!error) {
-      const now = new Date();
-      const filtered = data.filter(b => {
-        const bTime = parseISO(b.booking_time);
-        return activeTab === 'upcoming' ? isAfter(bTime, now) : isBefore(bTime, now);
-      });
-      setBookings(filtered);
+      setBookings(data);
+    } else {
+      console.error("Error fetching bookings:", error);
     }
     setLoading(false);
   }
 
-  // NEW FUNCTION: Handle Canceling a booking
   const handleCancel = async (bookingId) => {
-    // Standard browser confirmation so you don't delete by accident
     const confirmCancel = window.confirm("Are you sure you want to cancel this meeting?");
     if (!confirmCancel) return;
 
-    // Delete from Supabase
     const { error } = await supabase
       .from('bookings')
       .delete()
@@ -55,23 +67,42 @@ export default function MeetingsPage() {
     if (error) {
       alert("Error canceling booking: " + error.message);
     } else {
-      // Remove it from the UI immediately without needing to refresh
       setBookings(bookings.filter(b => b.id !== bookingId));
     }
   };
 
+  // NEW: Filter bookings based on the search term
+  const filteredBookings = bookings.filter(b => 
+    b.guest_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    b.guest_email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    b.event_types?.title?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
   return (
-    <div className="max-w-5xl relative">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-slate-900">Scheduled Events</h1>
-        <p className="text-slate-500 mt-1">View and manage your upcoming and past bookings.</p>
+    <div className="max-w-5xl relative mx-auto p-6">
+      <div className="mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900">Scheduled Events</h1>
+          <p className="text-slate-500 mt-1">View and manage your upcoming and past bookings.</p>
+        </div>
+        
+        {/* NEW: Search Bar */}
+        <div className="w-full md:w-72">
+          <input 
+            type="text"
+            placeholder="Search name, email, or event..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#006bff] focus:border-transparent"
+          />
+        </div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
         {/* Navigation Tabs */}
         <div className="flex border-b border-slate-100 bg-slate-50/50">
           <button 
-            onClick={() => setActiveTab('upcoming')}
+            onClick={() => { setActiveTab('upcoming'); setSearchTerm(''); }}
             className={`px-8 py-4 text-sm font-bold transition-all ${
               activeTab === 'upcoming' 
               ? 'border-b-2 border-[#006bff] text-[#006bff]' 
@@ -81,7 +112,7 @@ export default function MeetingsPage() {
             Upcoming
           </button>
           <button 
-            onClick={() => setActiveTab('past')}
+            onClick={() => { setActiveTab('past'); setSearchTerm(''); }}
             className={`px-8 py-4 text-sm font-bold transition-all ${
               activeTab === 'past' 
               ? 'border-b-2 border-[#006bff] text-[#006bff]' 
@@ -96,23 +127,29 @@ export default function MeetingsPage() {
         <div className="divide-y divide-slate-100">
           {loading ? (
             <div className="p-10 text-center text-slate-400 animate-pulse">Loading meetings...</div>
-          ) : bookings.length > 0 ? (
-            bookings.map((booking) => (
+          ) : filteredBookings.length > 0 ? (
+            filteredBookings.map((booking) => (
               <div key={booking.id} className="p-6 flex flex-col md:flex-row md:items-center justify-between hover:bg-slate-50 transition-colors group">
                 <div className="flex items-start gap-6">
                   {/* Color Indicator Bar */}
                   <div 
-                    className="w-1.5 h-16 rounded-full shrink-0" 
+                    className={`w-1.5 h-16 rounded-full shrink-0 ${activeTab === 'past' ? 'opacity-40' : ''}`}
                     style={{ backgroundColor: booking.event_types?.color || '#006bff' }}
                   />
                   
                   <div>
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-3 mb-1">
                       <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
                         {format(parseISO(booking.booking_time), 'EEEE, MMMM do')}
                       </span>
+                      {/* NEW: Completed Badge for Past Events */}
+                      {activeTab === 'past' && (
+                        <span className="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                          Completed
+                        </span>
+                      )}
                     </div>
-                    <h3 className="text-lg font-bold text-slate-800">
+                    <h3 className={`text-lg font-bold ${activeTab === 'past' ? 'text-slate-500' : 'text-slate-800'}`}>
                       {format(parseISO(booking.booking_time), 'h:mm a')} - {booking.guest_name}
                     </h3>
                     <p className="text-slate-500 text-sm">
@@ -123,7 +160,6 @@ export default function MeetingsPage() {
                 </div>
 
                 <div className="mt-4 md:mt-0 flex items-center gap-3">
-                  {/* ATTACHED DETAILS onClick */}
                   <button 
                     onClick={() => setSelectedBooking(booking)}
                     className="text-sm font-bold text-[#006bff] hover:underline px-4 py-2"
@@ -131,14 +167,21 @@ export default function MeetingsPage() {
                     Details
                   </button>
                   
-                  {/* ATTACHED CANCEL onClick */}
-                  {activeTab === 'upcoming' && (
+                  {activeTab === 'upcoming' ? (
                     <button 
                       onClick={() => handleCancel(booking.id)}
                       className="text-sm font-bold text-red-500 border border-red-100 px-4 py-2 rounded-lg hover:bg-red-50 transition-all"
                     >
                       Cancel
                     </button>
+                  ) : (
+                    /* NEW: Email action for past events instead of Cancel */
+                    <a 
+                      href={`mailto:${booking.guest_email}?subject=Following up on our recent meeting`}
+                      className="text-sm font-bold text-slate-600 border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-100 transition-all"
+                    >
+                      Email Guest
+                    </a>
                   )}
                 </div>
               </div>
@@ -146,16 +189,20 @@ export default function MeetingsPage() {
           ) : (
             <div className="py-20 text-center">
               <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">
-                📅
+                {searchTerm ? '🔍' : '📅'}
               </div>
-              <h3 className="text-lg font-bold text-slate-800">No {activeTab} events</h3>
-              <p className="text-slate-500 text-sm mt-1">When someone books a slot, it will appear here.</p>
+              <h3 className="text-lg font-bold text-slate-800">
+                {searchTerm ? 'No matching events found' : `No ${activeTab} events`}
+              </h3>
+              <p className="text-slate-500 text-sm mt-1">
+                {searchTerm ? 'Try adjusting your search terms.' : 'When someone books a slot, it will appear here.'}
+              </p>
             </div>
           )}
         </div>
       </div>
 
-      {/* NEW: DETAILS MODAL */}
+      {/* DETAILS MODAL */}
       {selectedBooking && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">

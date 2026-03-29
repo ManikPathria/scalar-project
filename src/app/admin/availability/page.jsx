@@ -5,8 +5,9 @@ import { supabase } from '@/lib/supabase';
 export default function AvailabilityPage() {
   const [loading, setLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState('weekly'); // 'weekly' or 'overrides'
 
-  // Initial default state
+  // Weekly Schedule State
   const defaultSchedule = [
     { day: "Sunday", active: false, slots: [] },
     { day: "Monday", active: true, slots: [{ start: "09:00", end: "17:00" }] },
@@ -16,38 +17,56 @@ export default function AvailabilityPage() {
     { day: "Friday", active: true, slots: [{ start: "09:00", end: "17:00" }] },
     { day: "Saturday", active: false, slots: [] },
   ];
-
   const [schedule, setSchedule] = useState(defaultSchedule);
+
+  // NEW: Date Overrides State
+  const [overrides, setOverrides] = useState([]);
 
   // 1. FETCH EXISTING AVAILABILITY ON LOAD
   useEffect(() => {
     async function fetchAvailability() {
       const { data, error } = await supabase.from('availability').select('*');
       
-      if (!error && data.length > 0) {
-        // Map database rows back to our UI state
+      if (!error && data) {
+        // Parse Weekly Hours (where specific_date is null)
+        const weeklyData = data.filter(row => row.specific_date === null);
         const loadedSchedule = defaultSchedule.map((dayObj, index) => {
-          const dbSlots = data.filter(row => row.day_of_week === index && row.is_active);
+          const dbSlots = weeklyData.filter(row => row.day_of_week === index && row.is_active);
           if (dbSlots.length > 0) {
             return {
               ...dayObj,
               active: true,
-              slots: dbSlots.map(s => ({ 
-                start: s.start_time.substring(0, 5), // '09:00:00' -> '09:00'
-                end: s.end_time.substring(0, 5) 
-              }))
+              slots: dbSlots.map(s => ({ start: s.start_time.substring(0, 5), end: s.end_time.substring(0, 5) }))
             };
           }
           return { ...dayObj, active: false, slots: [] };
         });
         setSchedule(loadedSchedule);
+
+        // Parse Date Overrides (where specific_date is NOT null)
+        const overrideData = data.filter(row => row.specific_date !== null);
+        const groupedOverrides = {};
+        
+        // Group slots by date
+        overrideData.forEach(row => {
+          if (!groupedOverrides[row.specific_date]) {
+             groupedOverrides[row.specific_date] = { date: row.specific_date, slots: [] };
+          }
+          if (row.is_active && row.start_time && row.end_time) {
+             groupedOverrides[row.specific_date].slots.push({
+               start: row.start_time.substring(0, 5),
+               end: row.end_time.substring(0, 5)
+             });
+          }
+        });
+        setOverrides(Object.values(groupedOverrides).sort((a, b) => new Date(a.date) - new Date(b.date)));
       }
       setLoading(false);
     }
     fetchAvailability();
   }, []);
 
-  // 2. UI HANDLERS
+  // --- WEEKLY HANDLERS ---
   const toggleDay = (index) => {
     const newSchedule = [...schedule];
     newSchedule[index].active = !newSchedule[index].active;
@@ -56,51 +75,83 @@ export default function AvailabilityPage() {
     }
     setSchedule(newSchedule);
   };
-
-  const updateTime = (dayIndex, slotIndex, field, value) => {
+  const updateWeeklyTime = (dayIndex, slotIndex, field, value) => {
     const newSchedule = [...schedule];
     newSchedule[dayIndex].slots[slotIndex][field] = value;
     setSchedule(newSchedule);
   };
-
-  const addInterval = (dayIndex) => {
+  const addWeeklyInterval = (dayIndex) => {
     const newSchedule = [...schedule];
     newSchedule[dayIndex].slots.push({ start: "09:00", end: "17:00" });
     setSchedule(newSchedule);
   };
-
-  const removeInterval = (dayIndex, slotIndex) => {
+  const removeWeeklyInterval = (dayIndex, slotIndex) => {
     const newSchedule = [...schedule];
     newSchedule[dayIndex].slots.splice(slotIndex, 1);
-    
-    // If no slots left, turn the day off completely
-    if (newSchedule[dayIndex].slots.length === 0) {
-      newSchedule[dayIndex].active = false;
-    }
+    if (newSchedule[dayIndex].slots.length === 0) newSchedule[dayIndex].active = false;
     setSchedule(newSchedule);
+  };
+
+  // --- OVERRIDE HANDLERS ---
+  const addOverrideDate = () => {
+    // Default to today
+    const today = new Date().toISOString().split('T')[0];
+    setOverrides([...overrides, { date: today, slots: [{ start: "09:00", end: "17:00" }] }]);
+  };
+  const updateOverrideDate = (oIdx, newDate) => {
+    const newOverrides = [...overrides];
+    newOverrides[oIdx].date = newDate;
+    setOverrides(newOverrides);
+  };
+  const updateOverrideTime = (oIdx, slotIndex, field, value) => {
+    const newOverrides = [...overrides];
+    newOverrides[oIdx].slots[slotIndex][field] = value;
+    setOverrides(newOverrides);
+  };
+  const addOverrideInterval = (oIdx) => {
+    const newOverrides = [...overrides];
+    newOverrides[oIdx].slots.push({ start: "09:00", end: "17:00" });
+    setOverrides(newOverrides);
+  };
+  const removeOverrideInterval = (oIdx, slotIndex) => {
+    const newOverrides = [...overrides];
+    newOverrides[oIdx].slots.splice(slotIndex, 1);
+    setOverrides(newOverrides);
+  };
+  const deleteOverride = (oIdx) => {
+    const newOverrides = [...overrides];
+    newOverrides.splice(oIdx, 1);
+    setOverrides(newOverrides);
   };
 
   // 3. SAVE TO SUPABASE
   const handleSave = async () => {
     setIsSaving(true);
-    
-    // Format the UI state into database rows
     const payload = [];
+    
+    // Package Weekly Slots
     schedule.forEach((dayObj, index) => {
       if (dayObj.active) {
         dayObj.slots.forEach(slot => {
-          payload.push({
-            day_of_week: index,
-            start_time: slot.start,
-            end_time: slot.end,
-            is_active: true
-          });
+          payload.push({ day_of_week: index, start_time: slot.start, end_time: slot.end, is_active: true, specific_date: null });
         });
       }
     });
 
+    // Package Override Slots
+    overrides.forEach(ov => {
+      if (ov.slots.length > 0) {
+        ov.slots.forEach(slot => {
+          payload.push({ day_of_week: null, start_time: slot.start, end_time: slot.end, is_active: true, specific_date: ov.date });
+        });
+      } else {
+        // If they deleted all slots for a date, save it as an "Unavailable" override
+        payload.push({ day_of_week: null, start_time: null, end_time: null, is_active: false, specific_date: ov.date });
+      }
+    });
+
     // Wipe old schedule and insert the new one
-    await supabase.from('availability').delete().neq('id', 0); // Delete all rows
+    await supabase.from('availability').delete().neq('id', 0); 
     const { error } = await supabase.from('availability').insert(payload);
 
     setIsSaving(false);
@@ -114,102 +165,134 @@ export default function AvailabilityPage() {
   if (loading) return <div className="p-10 text-center text-slate-500">Loading schedule...</div>;
 
   return (
-    <div className="max-w-4xl relative">
+    <div className="max-w-4xl relative mx-auto p-6">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-slate-900">Availability</h1>
-        <p className="text-slate-500 mt-1">Configure your default working hours.</p>
+        <p className="text-slate-500 mt-1">Configure your default working hours and specific date overrides.</p>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-        {/* Header Tabs Pattern */}
-        <div className="flex border-b border-slate-100">
-          <button className="px-8 py-4 text-sm font-bold border-b-2 border-[#006bff] text-[#006bff]">
+        {/* Navigation Tabs */}
+        <div className="flex border-b border-slate-100 bg-slate-50/50">
+          <button 
+            onClick={() => setActiveTab('weekly')}
+            className={`px-8 py-4 text-sm font-bold transition-all ${activeTab === 'weekly' ? 'border-b-2 border-[#006bff] text-[#006bff]' : 'text-slate-400 hover:text-slate-600'}`}
+          >
             Weekly Hours
           </button>
-          <button className="px-8 py-4 text-sm font-bold text-slate-400 hover:text-slate-600">
+          <button 
+            onClick={() => setActiveTab('overrides')}
+            className={`px-8 py-4 text-sm font-bold transition-all ${activeTab === 'overrides' ? 'border-b-2 border-[#006bff] text-[#006bff]' : 'text-slate-400 hover:text-slate-600'}`}
+          >
             Date Overrides
           </button>
         </div>
 
-        <div className="p-8 space-y-8">
-          {schedule.map((item, dIdx) => (
+        <div className="p-8 space-y-8 min-h-[400px]">
+          {/* --- WEEKLY HOURS VIEW --- */}
+          {activeTab === 'weekly' && schedule.map((item, dIdx) => (
             <div key={item.day} className="flex flex-col md:flex-row md:items-start gap-6 border-b border-slate-50 pb-6 last:border-0">
-              
-              {/* Day Toggle Area */}
               <div className="w-40 flex items-center gap-4">
                 <label className="relative inline-flex items-center cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    className="sr-only peer" 
-                    checked={item.active}
-                    onChange={() => toggleDay(dIdx)}
-                  />
+                  <input type="checkbox" className="sr-only peer" checked={item.active} onChange={() => toggleDay(dIdx)} />
                   <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#006bff]"></div>
                 </label>
-                <span className={`font-bold text-sm uppercase tracking-wide ${item.active ? 'text-slate-900' : 'text-slate-400'}`}>
-                  {item.day}
-                </span>
+                <span className={`font-bold text-sm uppercase tracking-wide ${item.active ? 'text-slate-900' : 'text-slate-400'}`}>{item.day}</span>
               </div>
 
-              {/* Time Slots Area */}
               <div className="flex-1">
                 {item.active ? (
                   <div className="space-y-3">
                     {item.slots.map((slot, sIdx) => (
                       <div key={sIdx} className="flex items-center gap-3">
-                        <input 
-                          type="time" 
-                          value={slot.start}
-                          onChange={(e) => updateTime(dIdx, sIdx, 'start', e.target.value)}
-                          className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none"
-                        />
+                        <input type="time" value={slot.start} onChange={(e) => updateWeeklyTime(dIdx, sIdx, 'start', e.target.value)} className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none" />
                         <span className="text-slate-400">—</span>
-                        <input 
-                          type="time" 
-                          value={slot.end}
-                          onChange={(e) => updateTime(dIdx, sIdx, 'end', e.target.value)}
-                          className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none"
-                        />
-                        {/* ATTACHED REMOVE HANDLER */}
-                        <button 
-                          onClick={() => removeInterval(dIdx, sIdx)}
-                          className="text-slate-400 hover:text-red-500 ml-2 transition-colors"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-                        </button>
+                        <input type="time" value={slot.end} onChange={(e) => updateWeeklyTime(dIdx, sIdx, 'end', e.target.value)} className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none" />
+                        <button onClick={() => removeWeeklyInterval(dIdx, sIdx)} className="text-slate-400 hover:text-red-500 ml-2">✕</button>
                       </div>
                     ))}
-                    {/* ATTACHED ADD HANDLER */}
-                    <button 
-                      onClick={() => addInterval(dIdx)}
-                      className="text-[#006bff] text-xs font-bold flex items-center gap-1 hover:underline mt-2"
-                    >
-                      <span>+</span> Add New Interval
+                    <button onClick={() => addWeeklyInterval(dIdx)} className="text-[#006bff] text-xs font-bold flex items-center gap-1 hover:underline mt-2">
+                      + Add Interval
                     </button>
                   </div>
                 ) : (
                   <span className="text-slate-400 text-sm font-medium italic">Unavailable</span>
                 )}
               </div>
-
-              {/* Action Buttons Pattern */}
-              <div className="w-10 flex justify-end">
-                <button className="text-slate-400 hover:text-slate-600">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                </button>
-              </div>
             </div>
           ))}
+
+          {/* --- DATE OVERRIDES VIEW --- */}
+          {activeTab === 'overrides' && (
+            <div>
+              <div className="mb-6 pb-6 border-b border-slate-100 flex justify-between items-center">
+                <p className="text-slate-500 text-sm">Add specific dates where your hours differ from your regular weekly schedule.</p>
+                <button onClick={addOverrideDate} className="bg-slate-100 text-slate-800 px-4 py-2 rounded-lg font-bold text-sm hover:bg-slate-200 transition-all">
+                  + Add Date Override
+                </button>
+              </div>
+
+              {overrides.length === 0 ? (
+                <div className="text-center py-10 text-slate-400 text-sm">No date overrides set.</div>
+              ) : (
+                <div className="space-y-6">
+                  {overrides.map((ov, oIdx) => (
+                    <div key={oIdx} className="flex flex-col md:flex-row md:items-start gap-6 border border-slate-100 p-6 rounded-xl bg-slate-50 relative">
+                      
+                      <div className="w-48">
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Select Date</label>
+                        <input 
+                          type="date" 
+                          value={ov.date} 
+                          onChange={(e) => updateOverrideDate(oIdx, e.target.value)}
+                          className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none"
+                        />
+                      </div>
+
+                      <div className="flex-1">
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Hours for this date</label>
+                        {ov.slots.length > 0 ? (
+                          <div className="space-y-3">
+                            {ov.slots.map((slot, sIdx) => (
+                              <div key={sIdx} className="flex items-center gap-3">
+                                <input type="time" value={slot.start} onChange={(e) => updateOverrideTime(oIdx, sIdx, 'start', e.target.value)} className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none" />
+                                <span className="text-slate-400">—</span>
+                                <input type="time" value={slot.end} onChange={(e) => updateOverrideTime(oIdx, sIdx, 'end', e.target.value)} className="border border-slate-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-[#006bff] outline-none" />
+                                <button onClick={() => removeOverrideInterval(oIdx, sIdx)} className="text-slate-400 hover:text-red-500 ml-2">✕</button>
+                              </div>
+                            ))}
+                            <button onClick={() => addOverrideInterval(oIdx)} className="text-[#006bff] text-xs font-bold flex items-center gap-1 hover:underline mt-2">
+                              + Add Interval
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="py-2 text-sm text-slate-500 font-medium italic flex items-center gap-2">
+                            <span className="w-2 h-2 bg-red-400 rounded-full"></span> Unavailable (No times set)
+                            <button onClick={() => addOverrideInterval(oIdx)} className="text-[#006bff] text-xs font-bold ml-4 hover:underline not-italic">
+                              + Add times
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <button onClick={() => deleteOverride(oIdx)} className="absolute top-6 right-6 text-slate-400 hover:text-red-500 text-sm font-bold">
+                        Delete
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Floating Footer Pattern */}
+        {/* Footer */}
         <div className="bg-slate-50 border-t border-slate-100 p-6 flex justify-between items-center">
             <p className="text-xs text-slate-500 font-medium">All times are set in your local timezone.</p>
-            {/* ATTACHED SAVE HANDLER */}
             <button 
               onClick={handleSave}
               disabled={isSaving}
-              className="bg-[#006bff] text-white px-8 py-2.5 rounded-full font-bold text-sm hover:bg-blue-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+              className="bg-[#006bff] text-white px-8 py-2.5 rounded-full font-bold text-sm hover:bg-blue-700 transition-all shadow-md disabled:opacity-50"
             >
               {isSaving ? 'Saving...' : 'Save Changes'}
             </button>
