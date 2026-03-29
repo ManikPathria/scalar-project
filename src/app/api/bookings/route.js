@@ -2,10 +2,29 @@ import { supabase } from '@/lib/supabase';
 import nodemailer from 'nodemailer';
 
 export async function POST(request) {
-  // Added meetingLink here (you can pass this from your frontend or generate it)
-  const { eventId, guestName, guestEmail, startTime, eventTitle, meetingLink = "#" } = await request.json();
+  const { eventId, guestName, guestEmail, startTime, eventTitle } = await request.json();
 
-  // 1. Save to Supabase
+  if (!eventId || !guestName || !guestEmail || !startTime || !eventTitle) {
+    return Response.json({ error: 'Missing required booking fields.' }, { status: 400 });
+  }
+
+  // 1. Block duplicate slot bookings for the same event type
+  const { data: conflictingBooking, error: conflictError } = await supabase
+    .from('bookings')
+    .select('id')
+    .eq('event_type_id', eventId)
+    .eq('booking_time', startTime)
+    .limit(1);
+
+  if (conflictError) {
+    return Response.json({ error: conflictError.message }, { status: 500 });
+  }
+
+  if (conflictingBooking && conflictingBooking.length > 0) {
+    return Response.json({ error: 'This slot is already booked.' }, { status: 409 });
+  }
+
+  // 2. Save to Supabase
   const { data, error } = await supabase
     .from('bookings')
     .insert([{ 
@@ -15,9 +34,12 @@ export async function POST(request) {
       booking_time: startTime 
     }]);
 
+  if (error?.code === '23505') {
+    return Response.json({ error: 'This slot is already booked.' }, { status: 409 });
+  }
   if (error) return Response.json({ error: error.message }, { status: 400 });
 
-  // 2. Setup Nodemailer
+  // 3. Setup Nodemailer
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -26,71 +48,55 @@ export async function POST(request) {
     },
   });
 
-  // 3. Email HTML Template (Calendly-style)
+  // 4. Email HTML Template (clean + simple)
   const emailHtml = `
-    <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f4f5f6; padding: 40px 20px; color: #1a1a1a;">
-      <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #e0e0e0;">
-        
-        <div style="padding: 30px 40px; border-bottom: 1px solid #f0f0f0;">
-          <h2 style="margin: 0; color: #1a1a1a; font-size: 24px; font-weight: 700;">Confirmed</h2>
-          <p style="font-size: 16px; color: #4d5055; line-height: 1.5; margin: 10px 0 0 0;">
-            You are scheduled with <strong>Smart Slot</strong>.
+    <div style="font-family: Arial, sans-serif; background-color: #f7f7f7; padding: 24px; color: #111827;">
+      <div style="max-width: 560px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; border: 1px solid #e5e7eb;">
+        <div style="padding: 24px; border-bottom: 1px solid #f3f4f6;">
+          <h2 style="margin: 0; font-size: 22px; font-weight: 700;">Meeting Scheduled</h2>
+          <p style="margin: 10px 0 0 0; font-size: 15px; color: #4b5563;">
+            Your meeting has been successfully scheduled with Smart Slot.
           </p>
         </div>
 
-        <div style="padding: 30px 40px;">
-          <h3 style="margin: 0 0 20px 0; color: #1a1a1a; font-size: 20px; font-weight: 600;">${eventTitle}</h3>
+        <div style="padding: 24px;">
+          <p style="margin: 0 0 14px 0; font-size: 16px; font-weight: 700;">${eventTitle}</p>
           
           <table style="width: 100%; border-collapse: collapse;">
             <tr>
-              <td style="padding: 12px 0; font-size: 15px; color: #4d5055; vertical-align: top; width: 80px;">
+              <td style="padding: 8px 0; font-size: 14px; color: #6b7280; vertical-align: top; width: 70px;">
                 <strong>When</strong>
               </td>
-              <td style="padding: 12px 0; font-size: 15px; color: #1a1a1a; font-weight: 500;">
+              <td style="padding: 8px 0; font-size: 14px; color: #111827; font-weight: 500;">
                 ${startTime}
               </td>
             </tr>
             <tr>
-              <td style="padding: 12px 0; font-size: 15px; color: #4d5055; vertical-align: top;">
+              <td style="padding: 8px 0; font-size: 14px; color: #6b7280; vertical-align: top;">
                 <strong>Who</strong>
               </td>
-              <td style="padding: 12px 0; font-size: 15px; color: #1a1a1a;">
+              <td style="padding: 8px 0; font-size: 14px; color: #111827;">
                 ${guestName} <br/>
-                <span style="color: #006bff;">${guestEmail}</span>
-              </td>
-            </tr>
-            <tr>
-              <td style="padding: 12px 0; font-size: 15px; color: #4d5055; vertical-align: top;">
-                <strong>Where</strong>
-              </td>
-              <td style="padding: 12px 0; font-size: 15px; color: #1a1a1a;">
-                Web Conference
+                <span style="color: #2563eb;">${guestEmail}</span>
               </td>
             </tr>
           </table>
-
-          // <div style="margin-top: 35px; text-align: left;">
-          //   <a href="${meetingLink}" target="_blank" style="display: inline-block; background-color: #006bff; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 40px; font-weight: bold; font-size: 16px; text-align: center;">
-          //     Join Meeting
-          //   </a>
-          // </div>
         </div>
-        
       </div>
 
-      <div style="text-align: center; margin-top: 25px; font-size: 13px; color: #888888;">
-        Powered by <strong>Smart Slot</strong>
+      <div style="text-align: center; margin-top: 16px; font-size: 12px; color: #9ca3af;">
+        Smart Slot
       </div>
     </div>
   `;
 
-  // 4. Send Email
+  // 5. Send Email
   try {
     await transporter.sendMail({
       from: '"Smart Slot" <no-reply@smartslot.com>',
       to: guestEmail,
-      subject: `Confirmed: ${eventTitle} with Smart Slot`,
-      html: emailHtml, // Inserted the new template here
+      subject: `Meeting Scheduled: ${eventTitle}`,
+      html: emailHtml,
     });
   } catch (err) {
     console.error("Email failed:", err);

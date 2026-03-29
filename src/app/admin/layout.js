@@ -36,12 +36,12 @@ export default function AdminLayout({ children }) {
       <aside className="w-64 border-r border-slate-200 fixed h-full bg-white z-20 hidden md:block">
         <div className="p-8">
           {/* Brand Logo */}
-          <div className="flex items-center gap-2 mb-10">
+          <Link href="/" className="flex items-center gap-2 mb-10 w-fit hover:opacity-90 transition-opacity">
             <div className="w-8 h-8 bg-[#006bff] rounded-lg flex items-center justify-center text-white font-extrabold text-lg">
               S
             </div>
             <span className="text-xl font-bold text-slate-900 tracking-tight">Smart Slot</span>
-          </div>
+          </Link>
 
           {/* Navigation */}
           <nav className="space-y-1">

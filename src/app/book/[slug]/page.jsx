@@ -95,6 +95,7 @@ export default function PublicBookingPage({ params }) {
     const { data: existingBookings } = await supabase
       .from('bookings')
       .select('booking_time')
+      .eq('event_type_id', event.id)
       .gte('booking_time', startOfDayIso)
       .lte('booking_time', endOfDayIso);
 
